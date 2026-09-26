@@ -23,6 +23,8 @@ const ids = new Map();
 const sequences = new Map();
 const required = ["sequence", "era", "age", "title", "creator", "youtube_id", "direct_url", "duration", "duration_seconds_source_listed", "role"];
 const directPattern = /^https:\/\/www\.youtube\.com\/watch\?v=([A-Za-z0-9_-]{11})$/;
+// Warn on gaps above 50 million years: large enough to identify major coverage gaps without treating ordinary period boundaries as errors.
+const CHRONOLOGY_GAP_WARNING_MA = 50;
 const parseAgeRangeMa = (age) => {
   const matches = [...String(age ?? "").matchAll(/\b(\d+(?:\.\d+)?)\s*(Ga|Ma|ka)?\b/gi)];
   const defaultUnit = [...matches].reverse().find((match) => match[2])?.[2];
@@ -38,6 +40,8 @@ const parseAgeRangeMa = (age) => {
 let totalSeconds = 0;
 let previousSequence = -Infinity;
 const datedRecords = [];
+const datedCoreRecords = [];
+const roleCounts = { "chronological core": 0, "deep dive": 0, supplement: 0 };
 for (const [index, video] of videos.entries()) {
   const row = index + 1;
   for (const key of required) {
@@ -58,6 +62,7 @@ for (const [index, video] of videos.entries()) {
   }
   if (typeof video?.direct_url !== "string" || !directPattern.test(video.direct_url)) errors.push(`row ${row}: direct_url must be an individual https://www.youtube.com/watch?v=VIDEO_ID URL`);
   else if (video.youtube_id && directPattern.exec(video.direct_url)?.[1] !== video.youtube_id) errors.push(`row ${row}: youtube_id does not match direct_url`);
+  if (Object.hasOwn(roleCounts, video?.role)) roleCounts[video.role] += 1;
   if (!Number.isSafeInteger(video?.duration_seconds_source_listed) || video.duration_seconds_source_listed <= 0) errors.push(`row ${row}: duration_seconds_source_listed must be a positive integer`);
   else totalSeconds += video.duration_seconds_source_listed;
   if (typeof video?.duration !== "string" || !/^\d{1,3}:\d{2}(?::\d{2})?$/.test(video.duration)) errors.push(`row ${row}: duration must be numeric time in M:SS or H:MM:SS format`);
@@ -67,7 +72,11 @@ for (const [index, video] of videos.entries()) {
     if (video.duration_seconds_source_listed && durationValue !== video.duration_seconds_source_listed) warnings.push(`row ${row}: display duration (${durationValue}s) differs from numeric source duration (${video.duration_seconds_source_listed}s)`);
   }
   const range = parseAgeRangeMa(video?.age);
-  if (range) datedRecords.push({ row, sequence: video.sequence, range, age: video.age });
+  if (range) {
+    const record = { row, sequence: video.sequence, range, age: video.age };
+    datedRecords.push(record);
+    if (video.role === "chronological core") datedCoreRecords.push(record);
+  }
 }
 let overlapCount = 0;
 for (let i = 1; i < datedRecords.length; i += 1) {
@@ -80,12 +89,22 @@ for (let i = 1; i < datedRecords.length; i += 1) {
   }
   if (later.range.young > earlier.range.old) errors.push(`row ${later.row}: chronology is clearly reversed (${later.age}) after ${earlier.age}`);
 }
+for (let i = 1; i < datedCoreRecords.length; i += 1) {
+  const earlier = datedCoreRecords[i - 1];
+  const later = datedCoreRecords[i];
+  const gapMa = earlier.range.young - later.range.old;
+  if (gapMa > CHRONOLOGY_GAP_WARNING_MA) {
+    const gap = gapMa >= 1000 ? `${(gapMa / 1000).toFixed(gapMa % 1000 === 0 ? 0 : 2)} billion years` : `${Math.round(gapMa)} million years`;
+    warnings.push(`chronological core seq ${earlier.sequence} → ${later.sequence}: explicit age labels leave a gap of about ${gap} (> ${CHRONOLOGY_GAP_WARNING_MA} million years)`);
+  }
+}
 const h = Math.floor(totalSeconds / 3600);
 const m = Math.floor((totalSeconds % 3600) / 60);
 const s = totalSeconds % 60;
 console.log(`Manifest: ${path.relative(root, file)}`);
 console.log(`Primary video records: ${videos.length}`);
 console.log(`Unique sequence numbers: ${sequences.size}`);
+console.log(`Roles: ${roleCounts["chronological core"]} chronological core, ${roleCounts["deep dive"]} deep dive, ${roleCounts.supplement} supplement`);
 console.log(`Calculated listed runtime: ${h} h ${m} m ${s} s (${(totalSeconds / 3600).toFixed(2)} h)`);
 console.log(`Chronology: ${datedRecords.length} records with parseable ages; ${overlapCount} adjacent age ranges overlap and remain in supplied manifest order.`);
 if (warnings.length) {
